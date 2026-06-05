@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   AreaChart, Area, BarChart, Bar, ComposedChart, ReferenceLine, Line } from "recharts";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 
 /* ══ INDICATORS ══════════════════════════════════════════ */
 const calcSMA = (a, n) => a.map((_, i) => i < n-1 ? null : a.slice(i-n+1,i+1).reduce((x,y)=>x+y,0)/n);
@@ -1956,6 +1957,7 @@ function Phase1Suite() {
           )}
         </>
       )}
+      <SpeedInsights />
     </div>
   );
 }
