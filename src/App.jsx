@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   AreaChart, Area, BarChart, Bar, ComposedChart, ReferenceLine, Line } from "recharts";
-import { SpeedInsights } from "@vercel/speed-insights/react";
 
 /* ══ INDICATORS ══════════════════════════════════════════ */
 const calcSMA = (a, n) => a.map((_, i) => i < n-1 ? null : a.slice(i-n+1,i+1).reduce((x,y)=>x+y,0)/n);
@@ -108,6 +107,9 @@ const INTERVALS=["1m","5m","15m","1h","4h","1d"];
 const EXCHANGES=["Binance","Coinbase","Kraken","OKX","Bybit"];
 const MONO="'JetBrains Mono','Fira Code','Courier New',monospace";
 
+/* ── Backend URL: all API calls route through Railway to avoid ISP blocks ── */
+const BACKEND_URL="https://nexusbot-backend-production.up.railway.app";
+
 const fmt=(n,d=2)=>typeof n==="number"?n.toFixed(d):"—";
 const fmtUSD=n=>{if(n==null||isNaN(n))return"—";const a=Math.abs(n);if(a>=1e6)return`$${(n/1e6).toFixed(2)}M`;if(a>=1e3)return`$${(n/1e3).toFixed(2)}K`;return`$${n.toFixed(a<1?4:2)}`;};
 const fmtPct=n=>`${n>=0?"+":""}${fmt(n)}%`;
@@ -115,8 +117,25 @@ const tsStr=ts=>new Date(ts).toLocaleTimeString("en",{hour12:false});
 const short=s=>s.replace("USDT","");
 const dateKey=ts=>{const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;};
 
+/* loadKlines — proxied through backend (avoids Nigeria/ISP blocks on Binance) */
 async function loadKlines(sym,interval="1h",limit=150){
-  try{const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);const d=await r.json();if(!Array.isArray(d))return[];return d.map(k=>({time:k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));}catch{return[];}
+  try{
+    const r=await fetch(`${BACKEND_URL}/api/klines/${sym}?interval=${interval}&limit=${limit}`);
+    const d=await r.json();
+    if(!Array.isArray(d))return[];
+    return d;
+  }catch{
+    /* fallback: try Binance directly if backend unreachable */
+    try{const r=await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);const d=await r.json();if(!Array.isArray(d))return[];return d.map(k=>({time:+k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));}catch{return[];}
+  }
+}
+
+/* Liquidation price calculator for futures */
+function calcLiqPrice(entry,leverage,side="long",mmr=0.004){
+  if(!entry||!leverage)return null;
+  return side==="long"
+    ? +(entry*(1-1/leverage+mmr)).toFixed(4)
+    : +(entry*(1+1/leverage-mmr)).toFixed(4);
 }
 async function hmacSHA256(secret,msg){
   const enc=new TextEncoder(),key=await crypto.subtle.importKey("raw",enc.encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
@@ -407,17 +426,24 @@ function Dashboard({portfolio,prices,trades,bots,priceDir}){
 /* ══ BOT MANAGER ════════════════════════════════════════ */
 function BotManager({bots,onAdd,onToggle,onRemove,onUpdateRisk,prices,trades}){
   const [showForm,setSF]=useState(false);
-  const [form,setForm]=useState({strategy:"RSI_MACD",symbol:"BTCUSDT",interval:"1h",amount:100});
+  const [form,setForm]=useState({strategy:"RSI_MACD",symbol:"BTCUSDT",interval:"1h",amount:100,leverage:10,marginMode:"isolated",side:"long"});
   const [expandRisk,setER]=useState({});const[riskEdit,setRE]=useState({});
   const bt=id=>trades.filter(t=>t.botId===id);const pnl=id=>bt(id).reduce((s,t)=>s+(t.pnl||0),0);
+  const liqPreview=form.amount&&form.leverage?calcLiqPrice(form.amount,form.leverage,form.side):null;
   return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
       <div style={{fontSize:13,fontWeight:700,color:C.text}}>Bot Manager <span style={{color:C.muted,fontWeight:400,fontSize:11}}>— {bots.filter(b=>b.active).length} active / {bots.length} total</span></div>
-      <button style={bs(C.green)} onClick={()=>setSF(p=>!p)}>+ New Bot</button>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{...bgs(C.orange),fontSize:9}}>⚡ Futures Mode</span>
+        <button style={bs(C.green)} onClick={()=>setSF(p=>!p)}>+ New Bot</button>
+      </div>
     </div>
     {showForm&&(<div style={cs({border:`1px solid ${C.greenBorder}`,background:C.greenBg+"44"})}>
-      <div style={{fontWeight:700,fontSize:12,marginBottom:14,color:C.text}}>Create New Bot</div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
+      <div style={{fontWeight:700,fontSize:12,marginBottom:4,color:C.text}}>Create New Futures Bot</div>
+      <div style={{padding:"8px 12px",background:C.redBg,borderRadius:6,border:`1px solid ${C.redBorder}`,fontSize:11,color:C.red,marginBottom:12}}>
+        ⚠️ Futures trading uses leverage. At {form.leverage}x, a {+(100/form.leverage).toFixed(1)}% adverse move = 100% margin loss. Always use Stop Loss.
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12}}>
         {[{lbl:"Strategy",key:"strategy",type:"select",opts:Object.values(STRATS).map(s=>({v:s.id,l:`${s.icon} ${s.label}`}))},
           {lbl:"Symbol",key:"symbol",type:"select",opts:CRYPTO_SYMS.map(s=>({v:s,l:s}))},
           {lbl:"Interval",key:"interval",type:"select",opts:INTERVALS.map(i=>({v:i,l:i}))},
@@ -427,8 +453,32 @@ function BotManager({bots,onAdd,onToggle,onRemove,onUpdateRisk,prices,trades}){
             :<input style={is} type="number" value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:+e.target.value}))}/>}
           </div>
         ))}
+        {/* Leverage */}
+        <div><label style={ls}>Leverage</label>
+          <select style={is} value={form.leverage} onChange={e=>setForm(p=>({...p,leverage:+e.target.value}))}>
+            {[1,2,3,5,10,15,20,25,50].map(l=><option key={l} value={l}>{l}x</option>)}
+          </select>
+        </div>
+        {/* Margin mode */}
+        <div><label style={ls}>Margin Mode</label>
+          <div style={{display:"flex",gap:6,marginTop:4}}>
+            {["isolated","cross"].map(m=><button key={m} style={{...bs(form.marginMode===m?C.cyan:C.muted,form.marginMode===m?"solid":"outline"),padding:"5px 12px",flex:1,textTransform:"capitalize"}} onClick={()=>setForm(p=>({...p,marginMode:m}))}>{m}</button>)}
+          </div>
+        </div>
+        {/* Direction */}
+        <div><label style={ls}>Default Direction</label>
+          <div style={{display:"flex",gap:6,marginTop:4}}>
+            {[{v:"long",label:"▲ Long"},{v:"short",label:"▼ Short"}].map(d=><button key={d.v} style={{...bs(form.side===d.v?d.v==="long"?C.green:C.red:C.muted,form.side===d.v?"solid":"outline"),padding:"5px 12px",flex:1}} onClick={()=>setForm(p=>({...p,side:d.v}))}>{d.label}</button>)}
+          </div>
+        </div>
       </div>
-      {STRATS[form.strategy]&&<div style={{marginTop:10,color:C.mutedHi,fontSize:11,padding:"8px 12px",background:C.surface,borderRadius:6,borderLeft:`3px solid ${STRATS[form.strategy].color}`}}>{STRATS[form.strategy].desc}</div>}
+      {/* Liquidation preview */}
+      <div style={{marginTop:12,padding:"8px 14px",background:C.surface,borderRadius:6,display:"flex",gap:24,fontSize:11}}>
+        <span style={{color:C.muted}}>Leverage: <span style={{color:C.orange,fontWeight:700}}>{form.leverage}x</span></span>
+        <span style={{color:C.muted}}>Margin Mode: <span style={{color:C.cyan,fontWeight:700,textTransform:"capitalize"}}>{form.marginMode}</span></span>
+        <span style={{color:C.muted}}>Liq distance: <span style={{color:C.red,fontWeight:700}}>≈ {+(100/form.leverage).toFixed(1)}%</span> from entry</span>
+      </div>
+      {STRATS[form.strategy]&&<div style={{marginTop:8,color:C.mutedHi,fontSize:11,padding:"8px 12px",background:C.surface,borderRadius:6,borderLeft:`3px solid ${STRATS[form.strategy].color}`}}>{STRATS[form.strategy].desc}</div>}
       <div style={{display:"flex",gap:8,marginTop:14}}>
         <button style={bs(C.green)} onClick={()=>{onAdd(form);setSF(false);}}>Create Bot</button>
         <button style={bs(C.red,"outline")} onClick={()=>setSF(false)}>Cancel</button>
@@ -437,12 +487,21 @@ function BotManager({bots,onAdd,onToggle,onRemove,onUpdateRisk,prices,trades}){
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:12}}>
       {bots.map(bot=>{
         const st=STRATS[bot.strategy],p=pnl(bot.id),tc=bt(bot.id).length,price=prices[bot.symbol]?.price,isR=expandRisk[bot.id],risk=riskEdit[bot.id]||bot.risk||{sl:2,tp:4,trail:1.5};
+        const lev=bot.leverage||1,liqDist=+(100/lev).toFixed(1);
         return(<div key={bot.id} style={{...cs(),border:`1px solid ${bot.active?st?.color+"55":C.border}`,position:"relative",overflow:"hidden"}}>
           {bot.active&&<div style={{position:"absolute",top:0,left:0,right:0,height:3,background:`linear-gradient(90deg,transparent,${st?.color},transparent)`,animation:"scan 2.5s linear infinite"}}/>}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
               <div style={{width:36,height:36,borderRadius:8,background:st?.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{st?.icon}</div>
-              <div><div style={{color:st?.color,fontWeight:800,fontSize:13}}>{st?.label}</div><div style={{color:C.muted,fontSize:10,marginTop:1}}>{bot.symbol} · {bot.interval} · ${bot.amount}/trade</div></div>
+              <div>
+                <div style={{color:st?.color,fontWeight:800,fontSize:13}}>{st?.label}</div>
+                <div style={{color:C.muted,fontSize:10,marginTop:1}}>{bot.symbol} · {bot.interval} · ${bot.amount}</div>
+                <div style={{display:"flex",gap:6,marginTop:3}}>
+                  <span style={bgs(C.orange)}>{lev}x</span>
+                  <span style={bgs(C.cyan)}>{bot.marginMode||"isolated"}</span>
+                  <span style={{...bgs(bot.side==="short"?C.red:C.green),fontSize:9}}>{bot.side==="short"?"▼ Short":"▲ Long"}</span>
+                </div>
+              </div>
             </div>
             <div style={{display:"flex",gap:6}}>
               <button style={{...bs(bot.active?C.red:C.green),padding:"5px 12px",fontSize:10}} onClick={()=>onToggle(bot.id)}>{bot.active?"■ Stop":"▶ Run"}</button>
@@ -453,6 +512,12 @@ function BotManager({bots,onAdd,onToggle,onRemove,onUpdateRisk,prices,trades}){
             {[{l:"Trades",v:tc,c:C.cyan},{l:"P&L",v:fmtUSD(p),c:p>=0?C.green:C.red},{l:"Wins",v:bt(bot.id).filter(t=>t.pnl>0).length,c:C.green},{l:"Signal",v:bot.lastSignal||"—",c:C.mutedHi}].map(({l,v,c})=>(
               <div key={l} style={{background:C.surface,borderRadius:6,padding:"8px 10px"}}><div style={{color:C.muted,fontSize:9,fontWeight:600,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:3}}>{l}</div><div style={{color:c,fontSize:13,fontWeight:700}}>{v}</div></div>
             ))}
+          </div>
+          {/* Futures risk info */}
+          <div style={{padding:"6px 10px",background:C.redBg,borderRadius:6,border:`1px solid ${C.redBorder}`,fontSize:10,marginBottom:8,display:"flex",gap:16}}>
+            <span style={{color:C.muted}}>Liq distance: <span style={{color:C.red,fontWeight:700}}>{liqDist}%</span></span>
+            <span style={{color:C.muted}}>SL: <span style={{color:C.red,fontWeight:700}}>{risk.sl}%</span></span>
+            <span style={{color:C.muted}}>TP: <span style={{color:C.green,fontWeight:700}}>{risk.tp}%</span></span>
           </div>
           <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",marginBottom:isR?10:0}} onClick={()=>setER(p=>({...p,[bot.id]:!p[bot.id]}))}>
@@ -497,7 +562,7 @@ function ChartView({prices,allCandles}){
     loadKlines(sym,iv,120).then(raw=>{if(raw.length)setCandles(raw);setLoading(false);});
     if(wsRef.current)wsRef.current.close();
     try{
-      const ws=new WebSocket(`wss://stream.binance.com:9443/ws/${sym.toLowerCase()}@kline_${iv}`);
+      const ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
       ws.onmessage=e=>{
         try{
           const{k}=JSON.parse(e.data);
@@ -658,7 +723,7 @@ function MiniCandleCard({item,onClick}){
       }
     });
     try{
-      const ws=new WebSocket(`wss://stream.binance.com:9443/ws/${item.sym.toLowerCase()}@kline_1h`);
+      const ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
       ws.onmessage=e=>{
         try{
           const{k}=JSON.parse(e.data);
@@ -749,7 +814,7 @@ function CryptoFullChart({item,onClose,prices}){
     loadKlines(item.sym,iv,150).then(raw=>{if(raw.length)setCandles(raw);});
     if(wsRef.current)wsRef.current.close();
     try{
-      const ws=new WebSocket(`wss://stream.binance.com:9443/ws/${item.sym.toLowerCase()}@kline_${iv}`);
+      const ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
       ws.onmessage=e=>{try{const{k}=JSON.parse(e.data);const nc={time:k.t,open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};setCandles(prev=>{if(!prev.length)return prev;const last=prev[prev.length-1];if(last.time===nc.time)return[...prev.slice(0,-1),{...last,high:Math.max(last.high,nc.high),low:Math.min(last.low,nc.low),close:nc.close,volume:nc.volume}];if(k.x)return[...prev.slice(-149),nc];return prev;});}catch{}};
       wsRef.current=ws;
     }catch{}
@@ -1365,7 +1430,7 @@ export default function TradingBot(){
     const streams=CRYPTO_SYMS.map(s=>`${s.toLowerCase()}@miniTicker`).join("/");
     let ws;
     try{
-      ws=new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+      ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
       ws.onmessage=e=>{
         try{
           const{data:d}=JSON.parse(e.data);if(!d?.s)return;
@@ -1957,7 +2022,6 @@ function Phase1Suite() {
           )}
         </>
       )}
-      <SpeedInsights />
     </div>
   );
 }
