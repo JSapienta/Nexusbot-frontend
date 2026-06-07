@@ -1366,6 +1366,348 @@ function Settings({apiKeys,setApiKeys,setPortfolio}){
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
         <button style={bs(C.amber)} onClick={()=>setApiKeys(keys)}>Save Config</button>
         <button style={bs(C.muted,"outline")} onClick={()=>setReveal(p=>!p)}>{reveal?"Hide":"Show"} Keys</button>
+    return{bot,total:bt.length,sells:sells.length,wins:wins.length,losses:sells.length-wins.length,totalPnL,winRate,sharpe:stdR>0?meanR/stdR*Math.sqrt(365):0,sortino:downStd>0?meanR/downStd*Math.sqrt(365):0,maxDD};
+  });
+  const now=new Date(),months=[];
+  for(let i=11;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1);months.push({key:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`,label:d.toLocaleDateString("en",{month:"short",year:"2-digit"})});}
+  const monthly={};trades.filter(t=>t.pnl!=null&&t.side==="SELL").forEach(t=>{const k=dateKey(t.timestamp);if(monthly[k]===undefined)monthly[k]=0;monthly[k]+=t.pnl;});
+  const maxAbs=Math.max(...months.map(m=>Math.abs(monthly[m.key]||0)),1);
+  let running=portfolio.balance||10000;
+  const eqCurve=trades.filter(t=>t.pnl!=null&&t.side==="SELL").sort((a,b)=>a.timestamp-b.timestamp).map(t=>{running+=t.pnl;return{t:new Date(t.timestamp).toLocaleDateString("en",{month:"short",day:"numeric"}),v:+running.toFixed(2)};});
+  const closedTrades=trades.filter(t=>t.pnl!=null&&t.side==="SELL").sort((a,b)=>b.pnl-a.pnl);
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
+    <div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:C.text}}>Per-Bot Performance</div>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>{["Bot","Strategy","Trades","Wins","Losses","Total P&L","Win Rate","Sharpe","Sortino","Max DD"].map(h=><th key={h} style={TH}>{h}</th>)}</tr></thead>
+        <tbody>{botStats.map(({bot,total,wins,losses,totalPnL,winRate,sharpe,sortino,maxDD})=>{
+          const st=STRATS[bot.strategy];
+          return(<tr key={bot.id}>
+            <td style={{...TD,fontWeight:700,color:C.amber}}>{bot.id.slice(-6)}</td>
+            <td style={{...TD,color:st?.color}}>{st?.icon} {st?.label}</td>
+            <td style={TD}>{total}</td><td style={{...TD,color:C.green,fontWeight:600}}>{wins}</td><td style={{...TD,color:C.red,fontWeight:600}}>{losses}</td>
+            <td style={{...TD,color:totalPnL>=0?C.green:C.red,fontWeight:700}}>{fmtUSD(totalPnL)}</td>
+            <td style={{...TD,color:winRate>=50?C.green:C.red}}>{fmt(winRate)}%</td>
+            <td style={{...TD,color:sharpe>=1?C.green:sharpe>=0?C.amber:C.red}}>{fmt(sharpe,3)}</td>
+            <td style={{...TD,color:sortino>=1?C.green:sortino>=0?C.amber:C.red}}>{fmt(sortino,3)}</td>
+            <td style={{...TD,color:C.orange}}>-{fmt(maxDD)}%</td>
+          </tr>);
+        })}
+        {!botStats.length&&<tr><td colSpan={10} style={{...TD,textAlign:"center",color:C.muted,padding:28}}>No bots created yet</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    <div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:C.text}}>Monthly P&L Heatmap</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
+        {months.map(m=>{const v=monthly[m.key]||0,intensity=Math.min(Math.abs(v)/maxAbs,1),bg=v>0?`rgba(22,163,74,${0.08+intensity*0.35})`:v<0?`rgba(220,38,38,${0.08+intensity*0.35})`:`${C.surface}`;
+          return(<div key={m.key} style={{background:bg,border:`1px solid ${v>0?C.greenBorder:v<0?C.redBorder:C.border}`,borderRadius:6,padding:"10px 8px",textAlign:"center"}}>
+            <div style={{color:C.muted,fontSize:10,marginBottom:4,fontWeight:600}}>{m.label}</div>
+            <div style={{color:v>0?C.green:v<0?C.red:C.muted,fontWeight:700,fontSize:13}}>{v?fmtUSD(v):"—"}</div>
+          </div>);
+        })}
+      </div>
+    </div>
+    {eqCurve.length>1&&<div style={cs({padding:"14px 16px 10px"})}>
+      <div style={{fontWeight:600,fontSize:11,color:C.mutedHi,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.06em"}}>Cumulative P&L Curve</div>
+      <ResponsiveContainer width="100%" height={180}>
+        <AreaChart data={eqCurve} margin={{top:4,right:5,left:0,bottom:4}}>
+          <defs><linearGradient id="aqG" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.cyan} stopOpacity={0.2}/><stop offset="95%" stopColor={C.cyan} stopOpacity={0}/></linearGradient></defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="t" tick={{fill:C.muted,fontSize:9}} interval={Math.max(1,Math.floor(eqCurve.length/8))}/><YAxis tick={{fill:C.muted,fontSize:9}} tickFormatter={v=>fmtUSD(v)} width={72}/>
+          <Tooltip formatter={v=>[fmtUSD(v),"Equity"]} contentStyle={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,fontFamily:MONO,fontSize:11}}/>
+          <Area type="monotone" dataKey="v" stroke={C.cyan} strokeWidth={2} fill="url(#aqG)"/>
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      {[{title:"🏆 Best Trades",data:closedTrades.slice(0,3),col:C.green,bg:C.greenBg},{title:"💀 Worst Trades",data:closedTrades.slice(-3).reverse(),col:C.red,bg:C.redBg}].map(({title,data,col,bg})=>(
+        <div key={title} style={{...cs(),background:bg+"44"}}>
+          <div style={{color:col,fontWeight:700,fontSize:12,marginBottom:12}}>{title}</div>
+          {data.length?data.map((t,i)=>(
+            <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>
+              <div><div style={{fontWeight:700,fontSize:11}}>{short(t.symbol)}</div><div style={{color:C.muted,fontSize:10}}>{STRATS[t.strategy]?.label} · {new Date(t.timestamp).toLocaleDateString("en",{month:"short",day:"numeric"})}</div></div>
+              <div style={{color:col,fontWeight:800,fontSize:14}}>{fmtUSD(t.pnl)}</div>
+            </div>
+          )):<div style={{color:C.muted,fontSize:11,padding:"16px 0",textAlign:"center"}}>No closed trades yet</div>}
+        </div>
+      ))}
+    </div>
+  </div>);
+}
+
+/* ══ ALERTS ══════════════════════════════════════════════ */
+function Alerts({prices,alerts,setAlerts,alertLog}){
+  const[form,setForm]=useState({symbol:"BTCUSDT",dir:"above",price:"",note:""});
+  const[notifPerm,setNP]=useState(typeof Notification!=="undefined"?Notification.permission:"denied");
+  const reqNotif=async()=>{if(typeof Notification==="undefined")return;const p=await Notification.requestPermission();setNP(p);};
+  const addAlert=()=>{if(!form.price)return;setAlerts(p=>[...p,{...form,price:+form.price,id:`al_${Date.now()}`,active:true,triggered:false,created:Date.now()}]);setForm(p=>({...p,price:"",note:""}));};
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{...cs(),background:notifPerm==="granted"?C.greenBg:C.amberBg,borderColor:notifPerm==="granted"?C.greenBorder:C.amberBorder}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><div style={{color:notifPerm==="granted"?C.green:C.amber,fontWeight:700,marginBottom:4}}>🔔 Browser Notifications — {notifPerm==="granted"?"Enabled":"Disabled"}</div>
+          <div style={{color:C.mutedHi,fontSize:11}}>{notifPerm==="granted"?"Alerts will fire as browser notifications even when tab is in background.":"Enable to receive price alerts outside this tab."}</div>
+        </div>
+        {notifPerm!=="granted"&&<button style={bs(C.amber)} onClick={reqNotif}>Enable</button>}
+      </div>
+    </div>
+    <div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:C.text}}>Create Price Alert</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12}}>
+        <div><label style={ls}>Symbol</label><select style={is} value={form.symbol} onChange={e=>setForm(p=>({...p,symbol:e.target.value}))}>{CRYPTO_SYMS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
+        <div><label style={ls}>Direction</label><select style={is} value={form.dir} onChange={e=>setForm(p=>({...p,dir:e.target.value}))}><option value="above">Crosses Above</option><option value="below">Drops Below</option></select></div>
+        <div><label style={ls}>Target Price ($)</label><input style={is} type="number" value={form.price} placeholder={prices[form.symbol]?.price?prices[form.symbol].price.toFixed(2):"e.g. 50000"} onChange={e=>setForm(p=>({...p,price:e.target.value}))}/></div>
+        <div><label style={ls}>Note (optional)</label><input style={is} type="text" value={form.note} placeholder="e.g. breakout level" onChange={e=>setForm(p=>({...p,note:e.target.value}))}/></div>
+      </div>
+      {prices[form.symbol]?.price&&<div style={{marginTop:8,color:C.mutedHi,fontSize:11}}>Current: <span style={{fontWeight:700,color:C.text}}>{fmtUSD(prices[form.symbol].price)}</span></div>}
+      <div style={{marginTop:14}}><button style={bs(C.amber)} onClick={addAlert}>+ Add Alert</button></div>
+    </div>
+    <div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:12,color:C.text}}>Active Alerts ({alerts.filter(a=>a.active&&!a.triggered).length} watching)</div>
+      {alerts.length?(<table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>{["Symbol","Condition","Current","Status","Note",""].map(h=><th key={h} style={TH}>{h}</th>)}</tr></thead>
+        <tbody>{alerts.map(a=>{const curr=prices[a.symbol]?.price;return(<tr key={a.id}>
+          <td style={{...TD,fontWeight:700}}>{short(a.symbol)}</td>
+          <td style={TD}><span style={{color:a.dir==="above"?C.green:C.red,fontWeight:600}}>{a.dir==="above"?"▲ Above":"▼ Below"}</span> <span style={{fontWeight:700}}>{fmtUSD(a.price)}</span></td>
+          <td style={TD}>{curr?fmtUSD(curr):"…"}</td>
+          <td style={TD}>{a.triggered?<span style={bgs(C.orange)}>✓ Triggered</span>:a.active?<span style={bgs(C.green)}>● Watching</span>:<span style={bgs(C.muted)}>Paused</span>}</td>
+          <td style={{...TD,color:C.muted,fontSize:10}}>{a.note||"—"}</td>
+          <td style={TD}><div style={{display:"flex",gap:4}}>
+            <button style={{...bs(a.active?C.muted:C.cyan,"outline"),padding:"2px 8px",fontSize:9}} onClick={()=>setAlerts(p=>p.map(x=>x.id===a.id?{...x,active:!x.active,triggered:false}:x))}>{a.active?"Pause":"Resume"}</button>
+            <button style={{...bs(C.red,"outline"),padding:"2px 8px",fontSize:9}} onClick={()=>setAlerts(p=>p.filter(x=>x.id!==a.id))}>✕</button>
+          </div></td>
+        </tr>);})}
+        </tbody>
+      </table>):<div style={{color:C.muted,fontSize:11,textAlign:"center",padding:24}}>No alerts set.</div>}
+    </div>
+    {alertLog.length>0&&<div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:12,color:C.text}}>Alert Log ({alertLog.length})</div>
+      {alertLog.slice(0,20).map((a,i)=>(
+        <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:a.dir==="above"?C.greenBg:C.redBg,borderRadius:6,border:`1px solid ${a.dir==="above"?C.greenBorder:C.redBorder}`,marginBottom:6}}>
+          <div><span style={{fontWeight:700,marginRight:8}}>{short(a.symbol)}</span><span style={{fontSize:11}}>{a.dir==="above"?"crossed above":"dropped below"} {fmtUSD(a.price)}</span>{a.note&&<span style={{color:C.muted,fontSize:10,marginLeft:8}}>— {a.note}</span>}</div>
+          <div style={{color:C.muted,fontSize:10}}>{new Date(a.triggeredAt).toLocaleString("en",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false})}</div>
+        </div>
+      ))}
+    </div>}
+  </div>);
+}
+
+/* ══ NEWS & SENTIMENT ════════════════════════════════════ */
+function NewsSentiment(){
+  const[fng,setFng]=useState(null),[news,setNews]=useState([]),[load,setLoad]=useState(false),[filter,setFilter]=useState("ALL");
+  const refresh=async()=>{setLoad(true);const[f,n]=await Promise.all([loadFearGreed(),loadCryptoNews()]);if(f)setFng(f);if(n.length)setNews(n);setLoad(false);};
+  useEffect(()=>{refresh();},[]);
+  const fngVal=fng?.[0]?.value,fngLabel=fng?.[0]?.value_classification||"—";
+  const fngColor=fngVal>75?C.green:fngVal>55?C.amber:fngVal>35?C.orange:C.red;
+  const sentCats=["ALL","BTC","ETH","Altcoin","Exchange","Technology","Regulation"];
+  const filtered=news.filter(n=>filter==="ALL"||n.categories?.toUpperCase().includes(filter.toUpperCase()));
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div style={{fontWeight:700,fontSize:13,color:C.text}}>News & Market Sentiment</div>
+      <button style={bs(C.cyan,"outline")} onClick={refresh} disabled={load}>{load?"⟳ Loading…":"↻ Refresh"}</button>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"260px 1fr",gap:14}}>
+      <div style={{...cs(),textAlign:"center"}}>
+        <div style={{fontWeight:600,fontSize:11,color:C.mutedHi,letterSpacing:"0.06em",textTransform:"uppercase",marginBottom:16}}>Crypto Fear & Greed Index</div>
+        {fng?(<>
+          <div style={{position:"relative",width:150,height:85,margin:"0 auto 14px"}}>
+            <svg viewBox="0 0 150 85" width="150" height="85">
+              <path d="M10 75 A65 65 0 0 1 140 75" fill="none" stroke={C.border} strokeWidth={14} strokeLinecap="round"/>
+              <path d="M10 75 A65 65 0 0 1 140 75" fill="none" stroke={fngColor} strokeWidth={14} strokeLinecap="round" strokeDasharray={`${(fngVal/100)*204} 204`}/>
+              <text x="75" y="68" textAnchor="middle" fontSize="26" fontWeight="800" fill={fngColor} fontFamily={MONO}>{fngVal}</text>
+            </svg>
+          </div>
+          <div style={{color:fngColor,fontSize:15,fontWeight:800,marginBottom:4}}>{fngLabel}</div>
+          <div style={{color:C.muted,fontSize:10,marginBottom:14}}>{new Date(+fng[0].timestamp*1000).toLocaleDateString()}</div>
+          <div style={{display:"flex",gap:3,justifyContent:"center"}}>
+            {fng.slice(0,7).reverse().map((d,i)=>{const v=+d.value,col=v>75?C.green:v>55?C.amber:v>35?C.orange:C.red;return(<div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+              <div style={{width:16,background:col,borderRadius:2,height:`${Math.max(4,v*0.38)}px`,opacity:0.85}}/>
+              <div style={{color:C.muted,fontSize:8}}>{new Date(+d.timestamp*1000).toLocaleDateString("en",{weekday:"narrow"})}</div>
+            </div>);})}
+          </div>
+          <div style={{color:C.muted,fontSize:9,marginTop:6}}>7-day trend</div>
+        </>):<div style={{color:C.muted,fontSize:12,padding:24}}>Loading…</div>}
+      </div>
+      <div style={cs()}>
+        <div style={{fontWeight:600,fontSize:11,color:C.mutedHi,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>Latest Crypto News</div>
+        <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+          {sentCats.map(cat=><button key={cat} style={{background:cat===filter?C.cyan:"transparent",color:cat===filter?"#fff":C.mutedHi,border:`1px solid ${cat===filter?C.cyan:C.border}`,borderRadius:4,padding:"3px 10px",cursor:"pointer",fontSize:10,fontWeight:600,fontFamily:MONO}} onClick={()=>setFilter(cat)}>{cat}</button>)}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:360,overflowY:"auto"}}>
+          {filtered.slice(0,12).map((n,i)=>(
+            <div key={i} style={{padding:"10px 12px",background:C.surface,borderRadius:6,border:`1px solid ${C.border}`,cursor:"pointer"}} onClick={()=>window.open(n.url,"_blank")}>
+              <div style={{fontWeight:600,fontSize:12,marginBottom:4,lineHeight:1.4,color:C.text}}>{n.title}</div>
+              <div style={{display:"flex",gap:10,fontSize:10,color:C.muted}}>
+                <span style={{color:C.cyan,fontWeight:600}}>{n.source_info?.name||n.source}</span>
+                <span>{new Date(n.published_on*1000).toLocaleDateString("en",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false})}</span>
+                {n.categories&&<span>{n.categories.split("|").slice(0,2).join(" · ")}</span>}
+              </div>
+            </div>
+          ))}
+          {!filtered.length&&<div style={{color:C.muted,fontSize:11,textAlign:"center",padding:24}}>{load?"Loading news…":"No news for this filter."}</div>}
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
+/* ══ STRATEGY BUILDER ════════════════════════════════════ */
+const IND_OPTS=[{v:"RSI",l:"RSI",hasP:true,pDef:14},{v:"MACD_LINE",l:"MACD Line",hasP:false},{v:"MACD_HIST",l:"MACD Histogram",hasP:false},{v:"BB_UPPER",l:"BB Upper",hasP:true,pDef:20},{v:"BB_LOWER",l:"BB Lower",hasP:true,pDef:20},{v:"EMA",l:"EMA",hasP:true,pDef:9},{v:"SMA",l:"SMA",hasP:true,pDef:20},{v:"PRICE",l:"Close Price",hasP:false},{v:"VOLUME",l:"Volume",hasP:false}];
+const OP_OPTS=[{v:">",l:">"},{v:"<",l:"<"},{v:">=",l:">="},{v:"<=",l:"<="},{v:"CROSSES_ABOVE",l:"crosses above"},{v:"CROSSES_BELOW",l:"crosses below"}];
+const mkCond=()=>({indicator:"RSI",period:14,operator:"<",value:30,id:Date.now()});
+function CondRow({cond,onChange,onRemove}){
+  const ind=IND_OPTS.find(o=>o.v===cond.indicator);
+  return(<div style={{display:"flex",gap:8,alignItems:"center",padding:"8px 12px",background:C.surface,borderRadius:6,marginBottom:6,border:`1px solid ${C.border}`}}>
+    <select style={{...is,width:160,flex:2}} value={cond.indicator} onChange={e=>onChange({...cond,indicator:e.target.value,period:IND_OPTS.find(o=>o.v===e.target.value)?.pDef||14})}>{IND_OPTS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+    {ind?.hasP&&<><span style={{color:C.muted,fontSize:10,whiteSpace:"nowrap",fontWeight:600}}>period</span><input style={{...is,width:60}} type="number" value={cond.period||14} onChange={e=>onChange({...cond,period:+e.target.value})}/></>}
+    <select style={{...is,width:140,flex:1}} value={cond.operator} onChange={e=>onChange({...cond,operator:e.target.value})}>{OP_OPTS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+    <input style={{...is,width:90}} type="number" value={cond.value} step="0.1" onChange={e=>onChange({...cond,value:+e.target.value})}/>
+    <button style={{...bs(C.red,"outline"),padding:"4px 8px"}} onClick={onRemove}>✕</button>
+  </div>);
+}
+function StrategyBuilder({onDeployCustomBot}){
+  const[name,setName]=useState("My Custom Strategy");
+  const[buyConds,setBuyConds]=useState([mkCond()]);
+  const[sellConds,setSellConds]=useState([{...mkCond(),operator:">",value:70}]);
+  const[buyLogic,setBuyLogic]=useState("AND"),[sellLogic,setSellLogic]=useState("OR");
+  const[btSym,setBtSym]=useState("BTCUSDT"),[btIv,setBtIv]=useState("1h");
+  const[btRes,setBtRes]=useState(null),[btLoad,setBtLoad]=useState(false);
+  const[deployAmt,setDeployAmt]=useState(100),[deployIv,setDeployIv]=useState("1h");
+  const updBuy=(i,c)=>setBuyConds(p=>p.map((x,j)=>j===i?c:x));
+  const updSell=(i,c)=>setSellConds(p=>p.map((x,j)=>j===i?c:x));
+  const testBT=async()=>{setBtLoad(true);setBtRes(null);const cs=await loadKlines(btSym,btIv,400);if(cs.length<60){setBtLoad(false);return;}
+    STRATS.CUSTOM_TEST={...STRATS.CUSTOM,run:(c)=>runCustomStrat(c,buyConds,sellConds,buyLogic,sellLogic)};
+    const r=runBacktest(cs,"CUSTOM_TEST",{buyConds,sellConds,buyLogic,sellLogic},{sl:2,tp:4,trail:1.5},10000,500);
+    delete STRATS.CUSTOM_TEST;setBtRes(r);setBtLoad(false);};
+  const deploy=()=>{onDeployCustomBot({name,buyConds,sellConds,buyLogic,sellLogic,symbol:btSym,interval:deployIv,amount:deployAmt});};
+  const rc=btRes?.ret>=0?C.green:C.red;
+  const eqD=(btRes?.equity||[]).filter((_,i)=>i%Math.max(1,Math.floor((btRes?.equity?.length||1)/60))===0);
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{...cs(),borderColor:C.purpleBorder,background:C.purpleBg+"33"}}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:C.purple}}>🔧 Visual Strategy Builder — No-Code Rule Editor</div>
+      <div style={{marginBottom:14}}><label style={ls}>Strategy Name</label><input style={{...is,maxWidth:320}} value={name} onChange={e=>setName(e.target.value)}/></div>
+      {/* BUY */}
+      <div style={{marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={{color:C.green,fontWeight:700,fontSize:12}}>▲ BUY Conditions</div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <span style={{color:C.muted,fontSize:10,fontWeight:600}}>Logic:</span>
+            {["AND","OR"].map(l=><button key={l} style={{background:buyLogic===l?C.green:"transparent",color:buyLogic===l?"#fff":C.mutedHi,border:`1px solid ${buyLogic===l?C.green:C.border}`,borderRadius:4,padding:"3px 10px",cursor:"pointer",fontSize:10,fontFamily:MONO}} onClick={()=>setBuyLogic(l)}>{l}</button>)}
+            <button style={bs(C.green,"outline")} onClick={()=>setBuyConds(p=>[...p,mkCond()])}>+ Add</button>
+          </div>
+        </div>
+        {buyConds.map((c,i)=><CondRow key={c.id} cond={c} onChange={nc=>updBuy(i,nc)} onRemove={()=>setBuyConds(p=>p.filter((_,j)=>j!==i))}/>)}
+        <div style={{color:C.muted,fontSize:10,padding:"4px 12px"}}>Fires BUY when {buyLogic==="AND"?"ALL":"ANY"} conditions are met.</div>
+      </div>
+      {/* SELL */}
+      <div style={{marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={{color:C.red,fontWeight:700,fontSize:12}}>▼ SELL Conditions</div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <span style={{color:C.muted,fontSize:10,fontWeight:600}}>Logic:</span>
+            {["AND","OR"].map(l=><button key={l} style={{background:sellLogic===l?C.red:"transparent",color:sellLogic===l?"#fff":C.mutedHi,border:`1px solid ${sellLogic===l?C.red:C.border}`,borderRadius:4,padding:"3px 10px",cursor:"pointer",fontSize:10,fontFamily:MONO}} onClick={()=>setSellLogic(l)}>{l}</button>)}
+            <button style={bs(C.red,"outline")} onClick={()=>setSellConds(p=>[...p,{...mkCond(),operator:">",value:70}])}>+ Add</button>
+          </div>
+        </div>
+        {sellConds.map((c,i)=><CondRow key={c.id} cond={c} onChange={nc=>updSell(i,nc)} onRemove={()=>setSellConds(p=>p.filter((_,j)=>j!==i))}/>)}
+        <div style={{color:C.muted,fontSize:10,padding:"4px 12px"}}>Fires SELL when {sellLogic==="AND"?"ALL":"ANY"} conditions are met.</div>
+      </div>
+      <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14,display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+        <div>
+          <div style={{fontWeight:600,fontSize:11,color:C.cyan,marginBottom:10}}>Test Strategy</div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <div style={{flex:1}}><label style={ls}>Symbol</label><select style={is} value={btSym} onChange={e=>setBtSym(e.target.value)}>{CRYPTO_SYMS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
+            <div style={{flex:1}}><label style={ls}>Interval</label><select style={is} value={btIv} onChange={e=>setBtIv(e.target.value)}>{INTERVALS.map(i=><option key={i} value={i}>{i}</option>)}</select></div>
+          </div>
+          <button style={bs(C.cyan)} onClick={testBT} disabled={btLoad}>{btLoad?"⟳ Testing…":"▶ Run Backtest"}</button>
+        </div>
+        <div>
+          <div style={{fontWeight:600,fontSize:11,color:C.purple,marginBottom:10}}>Deploy as Bot</div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <div style={{flex:1}}><label style={ls}>Amount ($)</label><input style={is} type="number" value={deployAmt} onChange={e=>setDeployAmt(+e.target.value)}/></div>
+            <div style={{flex:1}}><label style={ls}>Interval</label><select style={is} value={deployIv} onChange={e=>setDeployIv(e.target.value)}>{INTERVALS.map(i=><option key={i} value={i}>{i}</option>)}</select></div>
+          </div>
+          <button style={bs(C.purple)} onClick={deploy}>🚀 Deploy Bot</button>
+        </div>
+      </div>
+    </div>
+    {btRes&&<>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10}}>
+        <Stat label="Return" value={fmtPct(btRes.ret)} color={rc} bg={btRes.ret>=0?C.greenBg:C.redBg}/>
+        <Stat label="Final Equity" value={fmtUSD(btRes.finalEq)} color={C.amber} bg={C.amberBg}/>
+        <Stat label="Win Rate" value={`${fmt(btRes.winRate)}%`} color={btRes.winRate>=50?C.green:C.red}/>
+        <Stat label="Max DD" value={`-${fmt(btRes.maxDD)}%`} color={C.orange}/>
+        <Stat label="Sharpe" value={fmt(btRes.sharpe,3)} color={btRes.sharpe>=1?C.green:C.amber}/>
+        <Stat label="Trades" value={btRes.tradeCount} color={C.cyan}/>
+      </div>
+      <div style={cs({padding:"14px 16px 10px"})}>
+        <div style={{fontWeight:600,fontSize:11,color:C.mutedHi,marginBottom:10}}>Custom Strategy Equity Curve</div>
+        <ResponsiveContainer width="100%" height={160}>
+          <AreaChart data={eqD} margin={{top:4,right:5,left:0,bottom:4}}>
+            <defs><linearGradient id="sbG" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={rc} stopOpacity={0.2}/><stop offset="95%" stopColor={rc} stopOpacity={0}/></linearGradient></defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="t" tick={{fill:C.muted,fontSize:9}} interval={Math.max(1,Math.floor(eqD.length/8))}/><YAxis tick={{fill:C.muted,fontSize:9}} tickFormatter={v=>fmtUSD(v)} width={72}/>
+            <Tooltip formatter={v=>[fmtUSD(v),"Equity"]} contentStyle={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,fontFamily:MONO,fontSize:11}}/>
+            <Area type="monotone" dataKey="v" stroke={rc} strokeWidth={2} fill="url(#sbG)"/>
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+    </>}
+  </div>);
+}
+
+/* ══ TRADE HISTORY ═══════════════════════════════════════ */
+function TradeHistory({trades}){
+  const[fSym,setFS]=useState("ALL"),[fSide,setFSi]=useState("ALL"),[fExit,setFE]=useState("ALL");
+  const filtered=trades.filter(t=>(fSym==="ALL"||t.symbol===fSym)&&(fSide==="ALL"||t.side===fSide)&&(fExit==="ALL"||(t.exitReason||"SIGNAL")===fExit));
+  const totalPnL=filtered.reduce((s,t)=>s+(t.pnl||0),0),wins=filtered.filter(t=>t.pnl>0).length,losses=filtered.filter(t=>t.pnl<0).length;
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+      <select style={{...is,width:"auto"}} value={fSym} onChange={e=>setFS(e.target.value)}><option value="ALL">All Symbols</option>{CRYPTO_SYMS.map(s=><option key={s} value={s}>{s}</option>)}</select>
+      <select style={{...is,width:"auto"}} value={fSide} onChange={e=>setFSi(e.target.value)}><option value="ALL">All Sides</option><option value="BUY">BUY</option><option value="SELL">SELL</option></select>
+      <select style={{...is,width:"auto"}} value={fExit} onChange={e=>setFE(e.target.value)}><option value="ALL">All Exits</option><option value="SIGNAL">Signal</option><option value="SL">Stop Loss</option><option value="TP">Take Profit</option><option value="TRAIL">Trailing</option><option value="AI_SIGNAL">AI Signal</option></select>
+      <div style={{marginLeft:"auto",display:"flex",gap:16,fontSize:11,fontWeight:600}}>
+        <span style={{color:C.muted}}>Showing {filtered.length}</span>
+        <span style={{color:C.green}}>Wins: {wins}</span><span style={{color:C.red}}>Losses: {losses}</span>
+        <span style={{color:totalPnL>=0?C.green:C.red}}>P&L: {fmtUSD(totalPnL)}</span>
+      </div>
+    </div>
+    <div style={cs()}>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>{["#","DateTime","Pair","Side","Strategy","Price","Amount","P&L","Exit"].map(h=><th key={h} style={TH}>{h}</th>)}</tr></thead>
+        <tbody>
+          {filtered.map((t,i)=>(<tr key={t.id} style={{background:t.side==="BUY"?`${C.green}04`:`${C.red}04`}}>
+            <td style={{...TD,color:C.muted}}>{filtered.length-i}</td>
+            <td style={{...TD,color:C.muted,fontSize:10}}>{new Date(t.timestamp).toLocaleString("en",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false})}</td>
+            <td style={{...TD,fontWeight:700}}>{short(t.symbol)}</td>
+            <td style={TD}><Sig s={t.side}/></td>
+            <td style={{...TD,color:STRATS[t.strategy]?.color||C.purple,fontSize:10,fontWeight:600}}>{STRATS[t.strategy]?.icon} {STRATS[t.strategy]?.label||t.strategy}</td>
+            <td style={TD}>{fmtUSD(t.price)}</td><td style={TD}>{fmtUSD(t.amount)}</td>
+            <td style={{...TD,color:t.pnl>0?C.green:t.pnl<0?C.red:C.muted,fontWeight:t.pnl?700:400}}>{t.pnl!=null?fmtUSD(t.pnl):"—"}</td>
+            <td style={{...TD,fontSize:10,fontWeight:600,color:t.exitReason==="SL"?C.red:t.exitReason==="TP"?C.green:t.exitReason==="TRAIL"?C.orange:t.exitReason?.startsWith("AI")?C.purple:C.muted}}>{t.exitReason||"SIGNAL"}</td>
+          </tr>))}
+          {!filtered.length&&<tr><td colSpan={9} style={{...TD,textAlign:"center",color:C.muted,padding:28}}>No trades match filters</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </div>);
+}
+
+/* ══ SETTINGS ════════════════════════════════════════════ */
+function Settings({apiKeys,setApiKeys,setPortfolio}){
+  const[keys,setKeys]=useState(apiKeys),[reveal,setReveal]=useState(false),[balData,setBalData]=useState(null),[balLoad,setBL]=useState(false),[orderResult,setOR]=useState(null),[resetBal,setRB]=useState(10000);
+  const fetchBal=async()=>{setBL(true);const d=await getBinanceBalance(keys.key,keys.secret);setBalData(d);setBL(false);};
+  const testOrder=async(sym,side)=>{const r=await placeBinanceOrder(keys.key,keys.secret,sym,side,10);setOR(r);};
+  return(<div style={{padding:20,display:"flex",flexDirection:"column",gap:14,maxWidth:860}}>
+    <div style={cs()}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:C.text}}>Exchange API Configuration</div>
+      <div style={{marginBottom:14,padding:"10px 14px",background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:6,fontSize:11,color:C.red,lineHeight:1.7}}>⚠ Security: For production live trading, sign API requests server-side only. For testing, enable IP restrictions on your Binance API key.</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,marginBottom:14}}>
+        <div><label style={ls}>Exchange</label><select style={is} value={keys.exchange} onChange={e=>setKeys(p=>({...p,exchange:e.target.value}))}>{EXCHANGES.map(e=><option key={e} value={e}>{e}</option>)}</select></div>
+        <div><label style={ls}>API Key</label><input style={is} type={reveal?"text":"password"} value={keys.key} placeholder="Enter API key…" onChange={e=>setKeys(p=>({...p,key:e.target.value}))}/></div>
+        <div><label style={ls}>API Secret</label><input style={is} type={reveal?"text":"password"} value={keys.secret} placeholder="Enter secret…" onChange={e=>setKeys(p=>({...p,secret:e.target.value}))}/></div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <button style={bs(C.amber)} onClick={()=>setApiKeys(keys)}>Save Config</button>
+        <button style={bs(C.muted,"outline")} onClick={()=>setReveal(p=>!p)}>{reveal?"Hide":"Show"} Keys</button>
         <button style={bs(C.cyan,"outline")} onClick={fetchBal} disabled={balLoad}>{balLoad?"⟳ Loading…":"Fetch Balance"}</button>
         <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
           <span style={{color:C.muted,fontSize:11}}>Mode:</span>
@@ -1392,16 +1734,24 @@ function Settings({apiKeys,setApiKeys,setPortfolio}){
 
 /* ══ ROOT APP ════════════════════════════════════════════ */
 export default function TradingBot(){
-  const[tab,setTab]=useState("dashboard");
-  const[bots,setBots]=useState([]);
-  const[trades,setTrades]=useState([]);
-  const[portfolio,setPortfolio]=useState({balance:10000,positions:{},totalPnL:0});
+  // ── Persistent state — survives page refresh and tab switches ──────
+  const[bots,setBots]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_bots')||'[]');}catch{return[];}});
+  const[trades,setTrades]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_trades')||'[]');}catch{return[];}});
+  const[portfolio,setPortfolio]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_portfolio')||'{"balance":10000,"positions":{},"totalPnL":0}');}catch{return{balance:10000,positions:{},totalPnL:0};}});
   const[prices,setPrices]=useState({});
   const[candles,setCandles]=useState({});
   const[priceDir,setPriceDir]=useState({});
-  const[apiKeys,setApiKeys]=useState({exchange:"Binance",key:"",secret:"",live:false});
-  const[alerts,setAlerts]=useState([]);
-  const[alertLog,setAlertLog]=useState([]);
+  const[apiKeys,setApiKeys]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_apikeys')||'{"exchange":"Binance","key":"","secret":"","live":false}');}catch{return{exchange:"Binance",key:"",secret:"",live:false};}});
+  const[alerts,setAlerts]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alerts')||'[]');}catch{return[];}});
+  const[alertLog,setAlertLog]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alertlog')||'[]');}catch{return[];}});
+
+  // ── Auto-save to localStorage on every change ──────────────────────
+  useEffect(()=>{try{localStorage.setItem('nb_bots',JSON.stringify(bots));}catch{}},[bots]);
+  useEffect(()=>{try{localStorage.setItem('nb_trades',JSON.stringify(trades));}catch{}},[trades]);
+  useEffect(()=>{try{localStorage.setItem('nb_portfolio',JSON.stringify(portfolio));}catch{}},[portfolio]);
+  useEffect(()=>{try{localStorage.setItem('nb_apikeys',JSON.stringify(apiKeys));}catch{}},[apiKeys]);
+  useEffect(()=>{try{localStorage.setItem('nb_alerts',JSON.stringify(alerts));}catch{}},[alerts]);
+  useEffect(()=>{try{localStorage.setItem('nb_alertlog',JSON.stringify(alertLog));}catch{}},[alertLog]);
 
   const candlesRef=useRef({});const pricesRef=useRef({});const botsRef=useRef([]);
   const portfolioRef=useRef(portfolio);const alertsRef=useRef([]);
