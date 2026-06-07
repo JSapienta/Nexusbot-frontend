@@ -1392,6 +1392,8 @@ function Settings({apiKeys,setApiKeys,setPortfolio}){
 
 /* ══ ROOT APP ════════════════════════════════════════════ */
 export default function TradingBot(){
+  const[tab,setTab]=useState("dashboard");
+
   // ── Persistent state — survives page refresh and tab switches ──────
   const[bots,setBots]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_bots')||'[]');}catch{return[];}});
   const[trades,setTrades]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_trades')||'[]');}catch{return[];}});
