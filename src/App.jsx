@@ -1390,272 +1390,7 @@ function Settings({apiKeys,setApiKeys,setPortfolio}){
   </div>);
 }
 
-/* ══ ROOT APP ════════════════════════════════════════════ */
-export default function TradingBot(){
-  const[tab,setTab]=useState("dashboard");
 
-  // ── Persistent state — survives page refresh and tab switches ──────
-  const[bots,setBots]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_bots')||'[]');}catch{return[];}});
-  const[trades,setTrades]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_trades')||'[]');}catch{return[];}});
-  const[portfolio,setPortfolio]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_portfolio')||'{"balance":10000,"positions":{},"totalPnL":0}');}catch{return{balance:10000,positions:{},totalPnL:0};}});
-  const[prices,setPrices]=useState({});
-  const[candles,setCandles]=useState({});
-  const[priceDir,setPriceDir]=useState({});
-  const[apiKeys,setApiKeys]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_apikeys')||'{"exchange":"Binance","key":"","secret":"","live":false}');}catch{return{exchange:"Binance",key:"",secret:"",live:false};}});
-  const[alerts,setAlerts]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alerts')||'[]');}catch{return[];}});
-  const[alertLog,setAlertLog]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alertlog')||'[]');}catch{return[];}});
-
-  // ── Auto-save to localStorage on every change ──────────────────────
-  useEffect(()=>{try{localStorage.setItem('nb_bots',JSON.stringify(bots));}catch{}},[bots]);
-  useEffect(()=>{try{localStorage.setItem('nb_trades',JSON.stringify(trades));}catch{}},[trades]);
-  useEffect(()=>{try{localStorage.setItem('nb_portfolio',JSON.stringify(portfolio));}catch{}},[portfolio]);
-  useEffect(()=>{try{localStorage.setItem('nb_apikeys',JSON.stringify(apiKeys));}catch{}},[apiKeys]);
-  useEffect(()=>{try{localStorage.setItem('nb_alerts',JSON.stringify(alerts));}catch{}},[alerts]);
-  useEffect(()=>{try{localStorage.setItem('nb_alertlog',JSON.stringify(alertLog));}catch{}},[alertLog]);
-
-  const candlesRef=useRef({});const pricesRef=useRef({});const botsRef=useRef([]);
-  const portfolioRef=useRef(portfolio);const alertsRef=useRef([]);
-  const timersRef=useRef({});const prevPriceRef=useRef({});
-
-  useEffect(()=>{candlesRef.current=candles;},[candles]);
-  useEffect(()=>{pricesRef.current=prices;},[prices]);
-  useEffect(()=>{botsRef.current=bots;},[bots]);
-  useEffect(()=>{portfolioRef.current=portfolio;},[portfolio]);
-  useEffect(()=>{alertsRef.current=alerts;},[alerts]);
-
-  /* Boot: load candles */
-  useEffect(()=>{
-    CRYPTO_SYMS.forEach(sym=>{
-      loadKlines(sym,"1h",120).then(data=>{
-        if(!data.length)return;
-        setCandles(p=>({...p,[sym]:data}));
-        const last=data[data.length-1],first=data[0];
-        setPrices(p=>({...p,[sym]:{price:last.close,change24h:(last.close-first.close)/first.close*100}}));
-      });
-    });
-  },[]);
-
-  /* Price polling — refreshes every 15s as reliable fallback for WebSocket */
-  useEffect(()=>{
-    const poll=async()=>{
-      try{
-        const r=await fetch(`${BACKEND_URL}/api/prices`);
-        const d=await r.json();
-        if(!d||d.error)return;
-        Object.entries(d).forEach(([sym,info])=>{
-          if(!info?.price)return;
-          const prev=prevPriceRef.current[sym];
-          const dir=prev?info.price>prev?"up":info.price<prev?"down":null:null;
-          prevPriceRef.current[sym]=info.price;
-          setPrices(p=>({...p,[sym]:info}));
-          if(dir){
-            setPriceDir(p=>({...p,[sym]:dir}));
-            setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);
-          }
-        });
-      }catch{}
-    };
-    poll();
-    const id=setInterval(poll,15000);
-    return()=>clearInterval(id);
-  },[]);
-
-  /* WebSocket: live prices + price direction flash + alert checking */
-  useEffect(()=>{
-    const streams=CRYPTO_SYMS.map(s=>`${s.toLowerCase()}@miniTicker`).join("/");
-    let ws;
-    try{
-      ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
-      ws.onmessage=e=>{
-        try{
-          const{data:d}=JSON.parse(e.data);if(!d?.s)return;
-          const newPrice=parseFloat(d.c),sym=d.s,prev=prevPriceRef.current[sym];
-          const dir=prev?newPrice>prev?"up":newPrice<prev?"down":null:null;
-          prevPriceRef.current[sym]=newPrice;
-          setPrices(p=>({...p,[sym]:{price:newPrice,change24h:parseFloat(d.P)}}));
-          if(dir){setPriceDir(p=>({...p,[sym]:dir}));setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);}
-          /* Check alerts */
-          alertsRef.current.filter(a=>a.active&&!a.triggered&&a.symbol===sym).forEach(a=>{
-            if((a.dir==="above"&&newPrice>=a.price)||(a.dir==="below"&&newPrice<=a.price)){
-              setAlerts(p=>p.map(x=>x.id===a.id?{...x,triggered:true,triggeredAt:Date.now(),triggeredPrice:newPrice}:x));
-              setAlertLog(p=>[{...a,triggeredAt:Date.now(),triggeredPrice:newPrice},...p.slice(0,99)]);
-              if(typeof Notification!=="undefined"&&Notification.permission==="granted")
-                try{new Notification(`NEXUSBOT: ${short(sym)} Alert`,{body:`Price ${a.dir==="above"?"crossed above":"dropped below"} ${fmtUSD(a.price)}. Now: ${fmtUSD(newPrice)}`});}catch{}
-            }
-          });
-        }catch{}
-      };
-    }catch{}
-    return()=>ws?.close();
-  },[]);
-
-  /* Execute trade — paper or live */
-  const executeTrade=useCallback((bot,signal,price,exitReason="SIGNAL")=>{
-    if(!price||signal==="HOLD")return;
-    const qty=bot.amount/price;let pnl=null;
-    setPortfolio(prev=>{
-      const pos={...(prev.positions[bot.symbol]||{qty:0,avgPrice:0,hwm:0})};
-      if(signal==="BUY"){const nq=pos.qty+qty;pos.avgPrice=pos.qty===0?price:(pos.qty*pos.avgPrice+qty*price)/nq;pos.qty=nq;pos.hwm=Math.max(pos.hwm||0,price);}
-      else{const sq=Math.min(qty,pos.qty);pnl=sq>0?(price-pos.avgPrice)*sq:0;pos.qty=Math.max(0,pos.qty-sq);}
-      return{balance:prev.balance+(signal==="SELL"?bot.amount:-bot.amount),positions:{...prev.positions,[bot.symbol]:pos},totalPnL:prev.totalPnL+(pnl||0)};
-    });
-    const trade={id:`${bot.id}_${Date.now()}`,botId:bot.id,symbol:bot.symbol,side:signal,price,quantity:qty,amount:bot.amount,strategy:bot.strategy,timestamp:Date.now(),pnl,exitReason};
-    setTrades(p=>[trade,...p.slice(0,999)]);
-    setBots(p=>p.map(b=>b.id===bot.id?{...b,lastSignal:signal,lastExit:exitReason,trades:(b.trades||0)+1}:b));
-    if(apiKeys.live&&apiKeys.key&&apiKeys.secret)placeBinanceOrder(apiKeys.key,apiKeys.secret,bot.symbol,signal,bot.amount).catch(()=>{});
-  },[apiKeys]);
-
-  const executeAISignal=useCallback((sym,signal,price,amount)=>{
-    executeTrade({id:"ai_bot",symbol:sym,strategy:"AI",amount,risk:{sl:2,tp:4,trail:1.5}},signal,price,"AI_SIGNAL");
-  },[executeTrade]);
-
-  const deployCustomBot=useCallback((cfg)=>{
-    setBots(p=>[...p,{id:`bot_${Date.now().toString(36)}`,symbol:cfg.symbol||"BTCUSDT",interval:cfg.interval||"1h",amount:cfg.amount||100,strategy:"CUSTOM",config:{buyConds:cfg.buyConds,sellConds:cfg.sellConds,buyLogic:cfg.buyLogic,sellLogic:cfg.sellLogic},active:false,trades:0,risk:{sl:2,tp:4,trail:1.5},state:{},created:Date.now(),label:cfg.name}]);
-    setTab("bots");
-  },[]);
-
-  /* Run bot: risk check → strategy signal */
-  const runBot=useCallback(botId=>{
-    const bot=botsRef.current.find(b=>b.id===botId);if(!bot?.active)return;
-    const price=pricesRef.current[bot.symbol]?.price;if(!price)return;
-    const pos=portfolioRef.current.positions[bot.symbol];
-    if(pos?.qty>1e-8&&price>(pos.hwm||0))
-      setPortfolio(prev=>({...prev,positions:{...prev.positions,[bot.symbol]:{...prev.positions[bot.symbol],hwm:price}}}));
-    const riskExit=checkRisk(bot,pos,price);
-    if(riskExit){executeTrade(bot,"SELL",price,riskExit);return;}
-    const cd=candlesRef.current[bot.symbol];if(!cd?.length)return;
-    const strat=STRATS[bot.strategy];if(!strat)return;
-    const signal=strat.run(cd,{...strat.defaults,...bot.config},bot.state||{});
-    if(bot.strategy==="DCA"&&signal==="BUY")setBots(p=>p.map(b=>b.id===botId?{...b,state:{...b.state,lastDCA:Date.now()}}:b));
-    executeTrade(bot,signal,price,"SIGNAL");
-  },[executeTrade]);
-
-  /* Bot lifecycle */
-  useEffect(()=>{
-    bots.forEach(bot=>{
-      if(bot.active&&!timersRef.current[bot.id]){runBot(bot.id);timersRef.current[bot.id]=setInterval(()=>runBot(bot.id),10000);}
-      else if(!bot.active&&timersRef.current[bot.id]){clearInterval(timersRef.current[bot.id]);delete timersRef.current[bot.id];}
-    });
-  },[bots.map(b=>`${b.id}:${b.active}`).join(",")]);
-
-  const addBot=form=>{const strat=STRATS[form.strategy];setBots(p=>[...p,{...form,id:`bot_${Date.now().toString(36)}`,config:{...strat.defaults},active:false,trades:0,risk:{sl:2,tp:4,trail:1.5},state:form.strategy==="GRID"?{gridCenter:pricesRef.current[form.symbol]?.price||0}:{},created:Date.now()}]);};
-  const toggleBot=id=>setBots(p=>p.map(b=>b.id===id?{...b,active:!b.active}:b));
-  const removeBot=id=>{clearInterval(timersRef.current[id]);delete timersRef.current[id];setBots(p=>p.filter(b=>b.id!==id));};
-  const updateRisk=(id,risk)=>setBots(p=>p.map(b=>b.id===id?{...b,risk}:b));
-
-  const liveCount=bots.filter(b=>b.active).length;
-  const pendingAlerts=alerts.filter(a=>a.active&&!a.triggered).length;
-
-  const TABS=[
-    {id:"dashboard",label:"Dashboard"},
-    {id:"bots",label:`Bots${bots.length?` (${bots.length})`:""}`},
-    {id:"chart",label:"📊 Chart"},
-    {id:"livecharts",label:"📡 Live Charts"},
-    {id:"phase1",label:"✅ Phase 1"},
-    {id:"backtest",label:"Backtest"},
-    {id:"ai",label:"◈ AI Signals"},
-    {id:"analytics",label:"Analytics"},
-    {id:"alerts",label:`🔔 Alerts${pendingAlerts?` (${pendingAlerts})`:""}`},
-    {id:"news",label:"News"},
-    {id:"builder",label:"🔧 Builder"},
-    {id:"trades",label:`Trades${trades.length?` (${trades.length})`:""}`},
-    {id:"settings",label:"Settings"},
-  ];
-
-  const tabColor=id=>id==="ai"||id==="builder"?C.purple:id==="alerts"?C.orange:id==="livecharts"||id==="chart"?C.cyan:id==="phase1"?C.green:C.amber;
-
-  return(
-    <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:MONO,fontSize:12}}>
-      <style>{`
-        *{box-sizing:border-box;margin:0;padding:0}
-        body{background:#fff;color:#0f172a}
-        ::-webkit-scrollbar{width:6px;height:6px}
-        ::-webkit-scrollbar-track{background:${C.surface}}
-        ::-webkit-scrollbar-thumb{background:${C.borderHi};border-radius:3px}
-        ::-webkit-scrollbar-thumb:hover{background:${C.muted}}
-        select option{background:#fff;color:#0f172a}
-        button:hover{opacity:.87;transform:translateY(-0.5px)}
-        button:active{transform:translateY(0)}
-        input:focus,select:focus{border-color:${C.cyan}!important;box-shadow:0 0 0 3px ${C.cyan}22}
-        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(0.85)}}
-        @keyframes scan{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
-        @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-      `}</style>
-
-      {/* TOP NAV */}
-      <nav style={{background:C.bg,borderBottom:`1px solid ${C.border}`,padding:"0 20px",display:"flex",alignItems:"center",height:52,position:"sticky",top:0,zIndex:100,boxShadow:C.shadow,gap:0,overflowX:"auto"}}>
-        {/* Logo */}
-        <div style={{display:"flex",alignItems:"center",gap:10,marginRight:24,flexShrink:0}}>
-          <div style={{width:30,height:30,borderRadius:8,background:`linear-gradient(135deg,${C.amber},${C.orange})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,boxShadow:"0 2px 6px rgba(180,83,9,0.3)"}}>◈</div>
-          <div>
-            <div style={{fontWeight:900,fontSize:14,color:C.text,letterSpacing:"-0.02em",lineHeight:1}}>NexusBot</div>
-            <div style={{fontSize:9,color:C.muted,letterSpacing:"0.04em"}}>v5 · AUTO TRADER</div>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        {TABS.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 13px",height:"100%",display:"flex",alignItems:"center",cursor:"pointer",color:tab===t.id?tabColor(t.id):C.muted,fontSize:11,fontWeight:tab===t.id?700:500,background:"none",border:"none",borderBottom:tab===t.id?`2px solid ${tabColor(t.id)}`:"2px solid transparent",fontFamily:MONO,transition:"all 0.12s",whiteSpace:"nowrap"}}>
-            {t.label}
-          </button>
-        ))}
-
-        {/* Status badges */}
-        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8,flexShrink:0,paddingLeft:16}}>
-          {liveCount>0&&(
-            <span style={{...bgs(C.green),gap:5}}>
-              <span style={{width:6,height:6,borderRadius:"50%",background:C.green,display:"inline-block",animation:"pulse 1.5s ease-in-out infinite"}}/>
-              {liveCount} Live
-            </span>
-          )}
-          {pendingAlerts>0&&<span style={bgs(C.orange)}>🔔 {pendingAlerts}</span>}
-          <span style={bgs(apiKeys.live?C.red:C.cyan)}>{apiKeys.live?"⚡ Live":"◎ Paper"}</span>
-        </div>
-      </nav>
-
-      {/* PRICE TICKER BAR */}
-      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,height:32,display:"flex",alignItems:"center",padding:"0 20px",gap:28,overflowX:"auto",flexShrink:0}}>
-        {CRYPTO_SYMS.map(sym=>{
-          const p=prices[sym],chg=p?.change24h,dir=priceDir[sym];
-          return(
-            <span key={sym} style={{whiteSpace:"nowrap",display:"flex",gap:7,alignItems:"center",fontSize:11,cursor:"pointer"}} onClick={()=>setTab("chart")}>
-              <span style={{fontWeight:700,color:C.text}}>{short(sym)}</span>
-              <span style={{color:dir==="up"?C.green:dir==="down"?C.red:C.text,transition:"color 0.35s",fontWeight:600,fontVariantNumeric:"tabular-nums"}}>
-                {p?.price?fmtUSD(p.price):"…"}
-              </span>
-              {chg!=null&&(
-                <span style={{...bgs(chg>=0?C.green:C.red,chg>=0?C.greenBg:C.redBg),fontSize:9,padding:"1px 5px"}}>
-                  {fmtPct(chg)}
-                </span>
-              )}
-              {dir&&<span style={{color:dir==="up"?C.green:C.red,fontSize:11,fontWeight:700}}>{dir==="up"?"▲":"▼"}</span>}
-            </span>
-          );
-        })}
-        <span style={{marginLeft:"auto",color:C.muted,fontSize:10,whiteSpace:"nowrap",flexShrink:0}}>
-          Click any ticker to open chart
-        </span>
-      </div>
-
-      {/* MAIN CONTENT */}
-      <main style={{overflowY:"auto",minHeight:"calc(100vh - 84px)",background:C.surface2}}>
-        {tab==="dashboard"&&<Dashboard portfolio={portfolio} prices={prices} trades={trades} bots={bots} priceDir={priceDir}/>}
-        {tab==="bots"&&<BotManager bots={bots} onAdd={addBot} onToggle={toggleBot} onRemove={removeBot} onUpdateRisk={updateRisk} prices={prices} trades={trades}/>}
-        {tab==="chart"&&<ChartView prices={prices} allCandles={candles}/>}
-        {tab==="livecharts"&&<LiveCharts prices={prices}/>}
-        {tab==="phase1"&&<Phase1Suite/>}
-        {tab==="backtest"&&<Backtest/>}
-        {tab==="ai"&&<AISignals prices={prices} candles={candles} onExecute={executeAISignal}/>}
-        {tab==="analytics"&&<Analytics trades={trades} bots={bots} portfolio={portfolio}/>}
-        {tab==="alerts"&&<Alerts prices={prices} alerts={alerts} setAlerts={setAlerts} alertLog={alertLog}/>}
-        {tab==="news"&&<NewsSentiment/>}
-        {tab==="builder"&&<StrategyBuilder onDeployCustomBot={deployCustomBot}/>}
-        {tab==="trades"&&<TradeHistory trades={trades}/>}
-        {tab==="settings"&&<Settings apiKeys={apiKeys} setApiKeys={setApiKeys} setPortfolio={setPortfolio}/>}
-      </main>
-    </div>
-  );
-}
 /* ══ PHASE 1 VALIDATION SUITE ════════════════════════════════════════
    Strategy Sweep · Parameter Optimizer · Paper Trading Journal
    Everything you need to validate before risking real money.
@@ -2057,6 +1792,273 @@ function Phase1Suite() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* ══ ROOT APP ════════════════════════════════════════════ */
+export default function TradingBot(){
+  const[tab,setTab]=useState("dashboard");
+
+  // ── Persistent state — survives page refresh and tab switches ──────
+  const[bots,setBots]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_bots')||'[]');}catch{return[];}});
+  const[trades,setTrades]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_trades')||'[]');}catch{return[];}});
+  const[portfolio,setPortfolio]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_portfolio')||'{"balance":10000,"positions":{},"totalPnL":0}');}catch{return{balance:10000,positions:{},totalPnL:0};}});
+  const[prices,setPrices]=useState({});
+  const[candles,setCandles]=useState({});
+  const[priceDir,setPriceDir]=useState({});
+  const[apiKeys,setApiKeys]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_apikeys')||'{"exchange":"Binance","key":"","secret":"","live":false}');}catch{return{exchange:"Binance",key:"",secret:"",live:false};}});
+  const[alerts,setAlerts]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alerts')||'[]');}catch{return[];}});
+  const[alertLog,setAlertLog]=useState(()=>{try{return JSON.parse(localStorage.getItem('nb_alertlog')||'[]');}catch{return[];}});
+
+  // ── Auto-save to localStorage on every change ──────────────────────
+  useEffect(()=>{try{localStorage.setItem('nb_bots',JSON.stringify(bots));}catch{}},[bots]);
+  useEffect(()=>{try{localStorage.setItem('nb_trades',JSON.stringify(trades));}catch{}},[trades]);
+  useEffect(()=>{try{localStorage.setItem('nb_portfolio',JSON.stringify(portfolio));}catch{}},[portfolio]);
+  useEffect(()=>{try{localStorage.setItem('nb_apikeys',JSON.stringify(apiKeys));}catch{}},[apiKeys]);
+  useEffect(()=>{try{localStorage.setItem('nb_alerts',JSON.stringify(alerts));}catch{}},[alerts]);
+  useEffect(()=>{try{localStorage.setItem('nb_alertlog',JSON.stringify(alertLog));}catch{}},[alertLog]);
+
+  const candlesRef=useRef({});const pricesRef=useRef({});const botsRef=useRef([]);
+  const portfolioRef=useRef(portfolio);const alertsRef=useRef([]);
+  const timersRef=useRef({});const prevPriceRef=useRef({});
+
+  useEffect(()=>{candlesRef.current=candles;},[candles]);
+  useEffect(()=>{pricesRef.current=prices;},[prices]);
+  useEffect(()=>{botsRef.current=bots;},[bots]);
+  useEffect(()=>{portfolioRef.current=portfolio;},[portfolio]);
+  useEffect(()=>{alertsRef.current=alerts;},[alerts]);
+
+  /* Boot: load candles */
+  useEffect(()=>{
+    CRYPTO_SYMS.forEach(sym=>{
+      loadKlines(sym,"1h",120).then(data=>{
+        if(!data.length)return;
+        setCandles(p=>({...p,[sym]:data}));
+        const last=data[data.length-1],first=data[0];
+        setPrices(p=>({...p,[sym]:{price:last.close,change24h:(last.close-first.close)/first.close*100}}));
+      });
+    });
+  },[]);
+
+  /* Price polling — refreshes every 15s as reliable fallback for WebSocket */
+  useEffect(()=>{
+    const poll=async()=>{
+      try{
+        const r=await fetch(`${BACKEND_URL}/api/prices`);
+        const d=await r.json();
+        if(!d||d.error)return;
+        Object.entries(d).forEach(([sym,info])=>{
+          if(!info?.price)return;
+          const prev=prevPriceRef.current[sym];
+          const dir=prev?info.price>prev?"up":info.price<prev?"down":null:null;
+          prevPriceRef.current[sym]=info.price;
+          setPrices(p=>({...p,[sym]:info}));
+          if(dir){
+            setPriceDir(p=>({...p,[sym]:dir}));
+            setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);
+          }
+        });
+      }catch{}
+    };
+    poll();
+    const id=setInterval(poll,15000);
+    return()=>clearInterval(id);
+  },[]);
+
+  /* WebSocket: live prices + price direction flash + alert checking */
+  useEffect(()=>{
+    const streams=CRYPTO_SYMS.map(s=>`${s.toLowerCase()}@miniTicker`).join("/");
+    let ws;
+    try{
+      ws=new WebSocket(`wss://nexusbot-backend-production.up.railway.app/ws`);
+      ws.onmessage=e=>{
+        try{
+          const{data:d}=JSON.parse(e.data);if(!d?.s)return;
+          const newPrice=parseFloat(d.c),sym=d.s,prev=prevPriceRef.current[sym];
+          const dir=prev?newPrice>prev?"up":newPrice<prev?"down":null:null;
+          prevPriceRef.current[sym]=newPrice;
+          setPrices(p=>({...p,[sym]:{price:newPrice,change24h:parseFloat(d.P)}}));
+          if(dir){setPriceDir(p=>({...p,[sym]:dir}));setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);}
+          /* Check alerts */
+          alertsRef.current.filter(a=>a.active&&!a.triggered&&a.symbol===sym).forEach(a=>{
+            if((a.dir==="above"&&newPrice>=a.price)||(a.dir==="below"&&newPrice<=a.price)){
+              setAlerts(p=>p.map(x=>x.id===a.id?{...x,triggered:true,triggeredAt:Date.now(),triggeredPrice:newPrice}:x));
+              setAlertLog(p=>[{...a,triggeredAt:Date.now(),triggeredPrice:newPrice},...p.slice(0,99)]);
+              if(typeof Notification!=="undefined"&&Notification.permission==="granted")
+                try{new Notification(`NEXUSBOT: ${short(sym)} Alert`,{body:`Price ${a.dir==="above"?"crossed above":"dropped below"} ${fmtUSD(a.price)}. Now: ${fmtUSD(newPrice)}`});}catch{}
+            }
+          });
+        }catch{}
+      };
+    }catch{}
+    return()=>ws?.close();
+  },[]);
+
+  /* Execute trade — paper or live */
+  const executeTrade=useCallback((bot,signal,price,exitReason="SIGNAL")=>{
+    if(!price||signal==="HOLD")return;
+    const qty=bot.amount/price;let pnl=null;
+    setPortfolio(prev=>{
+      const pos={...(prev.positions[bot.symbol]||{qty:0,avgPrice:0,hwm:0})};
+      if(signal==="BUY"){const nq=pos.qty+qty;pos.avgPrice=pos.qty===0?price:(pos.qty*pos.avgPrice+qty*price)/nq;pos.qty=nq;pos.hwm=Math.max(pos.hwm||0,price);}
+      else{const sq=Math.min(qty,pos.qty);pnl=sq>0?(price-pos.avgPrice)*sq:0;pos.qty=Math.max(0,pos.qty-sq);}
+      return{balance:prev.balance+(signal==="SELL"?bot.amount:-bot.amount),positions:{...prev.positions,[bot.symbol]:pos},totalPnL:prev.totalPnL+(pnl||0)};
+    });
+    const trade={id:`${bot.id}_${Date.now()}`,botId:bot.id,symbol:bot.symbol,side:signal,price,quantity:qty,amount:bot.amount,strategy:bot.strategy,timestamp:Date.now(),pnl,exitReason};
+    setTrades(p=>[trade,...p.slice(0,999)]);
+    setBots(p=>p.map(b=>b.id===bot.id?{...b,lastSignal:signal,lastExit:exitReason,trades:(b.trades||0)+1}:b));
+    if(apiKeys.live&&apiKeys.key&&apiKeys.secret)placeBinanceOrder(apiKeys.key,apiKeys.secret,bot.symbol,signal,bot.amount).catch(()=>{});
+  },[apiKeys]);
+
+  const executeAISignal=useCallback((sym,signal,price,amount)=>{
+    executeTrade({id:"ai_bot",symbol:sym,strategy:"AI",amount,risk:{sl:2,tp:4,trail:1.5}},signal,price,"AI_SIGNAL");
+  },[executeTrade]);
+
+  const deployCustomBot=useCallback((cfg)=>{
+    setBots(p=>[...p,{id:`bot_${Date.now().toString(36)}`,symbol:cfg.symbol||"BTCUSDT",interval:cfg.interval||"1h",amount:cfg.amount||100,strategy:"CUSTOM",config:{buyConds:cfg.buyConds,sellConds:cfg.sellConds,buyLogic:cfg.buyLogic,sellLogic:cfg.sellLogic},active:false,trades:0,risk:{sl:2,tp:4,trail:1.5},state:{},created:Date.now(),label:cfg.name}]);
+    setTab("bots");
+  },[]);
+
+  /* Run bot: risk check → strategy signal */
+  const runBot=useCallback(botId=>{
+    const bot=botsRef.current.find(b=>b.id===botId);if(!bot?.active)return;
+    const price=pricesRef.current[bot.symbol]?.price;if(!price)return;
+    const pos=portfolioRef.current.positions[bot.symbol];
+    if(pos?.qty>1e-8&&price>(pos.hwm||0))
+      setPortfolio(prev=>({...prev,positions:{...prev.positions,[bot.symbol]:{...prev.positions[bot.symbol],hwm:price}}}));
+    const riskExit=checkRisk(bot,pos,price);
+    if(riskExit){executeTrade(bot,"SELL",price,riskExit);return;}
+    const cd=candlesRef.current[bot.symbol];if(!cd?.length)return;
+    const strat=STRATS[bot.strategy];if(!strat)return;
+    const signal=strat.run(cd,{...strat.defaults,...bot.config},bot.state||{});
+    if(bot.strategy==="DCA"&&signal==="BUY")setBots(p=>p.map(b=>b.id===botId?{...b,state:{...b.state,lastDCA:Date.now()}}:b));
+    executeTrade(bot,signal,price,"SIGNAL");
+  },[executeTrade]);
+
+  /* Bot lifecycle */
+  useEffect(()=>{
+    bots.forEach(bot=>{
+      if(bot.active&&!timersRef.current[bot.id]){runBot(bot.id);timersRef.current[bot.id]=setInterval(()=>runBot(bot.id),10000);}
+      else if(!bot.active&&timersRef.current[bot.id]){clearInterval(timersRef.current[bot.id]);delete timersRef.current[bot.id];}
+    });
+  },[bots.map(b=>`${b.id}:${b.active}`).join(",")]);
+
+  const addBot=form=>{const strat=STRATS[form.strategy];setBots(p=>[...p,{...form,id:`bot_${Date.now().toString(36)}`,config:{...strat.defaults},active:false,trades:0,risk:{sl:2,tp:4,trail:1.5},state:form.strategy==="GRID"?{gridCenter:pricesRef.current[form.symbol]?.price||0}:{},created:Date.now()}]);};
+  const toggleBot=id=>setBots(p=>p.map(b=>b.id===id?{...b,active:!b.active}:b));
+  const removeBot=id=>{clearInterval(timersRef.current[id]);delete timersRef.current[id];setBots(p=>p.filter(b=>b.id!==id));};
+  const updateRisk=(id,risk)=>setBots(p=>p.map(b=>b.id===id?{...b,risk}:b));
+
+  const liveCount=bots.filter(b=>b.active).length;
+  const pendingAlerts=alerts.filter(a=>a.active&&!a.triggered).length;
+
+  const TABS=[
+    {id:"dashboard",label:"Dashboard"},
+    {id:"bots",label:`Bots${bots.length?` (${bots.length})`:""}`},
+    {id:"chart",label:"📊 Chart"},
+    {id:"livecharts",label:"📡 Live Charts"},
+    {id:"phase1",label:"✅ Phase 1"},
+    {id:"backtest",label:"Backtest"},
+    {id:"ai",label:"◈ AI Signals"},
+    {id:"analytics",label:"Analytics"},
+    {id:"alerts",label:`🔔 Alerts${pendingAlerts?` (${pendingAlerts})`:""}`},
+    {id:"news",label:"News"},
+    {id:"builder",label:"🔧 Builder"},
+    {id:"trades",label:`Trades${trades.length?` (${trades.length})`:""}`},
+    {id:"settings",label:"Settings"},
+  ];
+
+  const tabColor=id=>id==="ai"||id==="builder"?C.purple:id==="alerts"?C.orange:id==="livecharts"||id==="chart"?C.cyan:id==="phase1"?C.green:C.amber;
+
+  return(
+    <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:MONO,fontSize:12}}>
+      <style>{`
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{background:#fff;color:#0f172a}
+        ::-webkit-scrollbar{width:6px;height:6px}
+        ::-webkit-scrollbar-track{background:${C.surface}}
+        ::-webkit-scrollbar-thumb{background:${C.borderHi};border-radius:3px}
+        ::-webkit-scrollbar-thumb:hover{background:${C.muted}}
+        select option{background:#fff;color:#0f172a}
+        button:hover{opacity:.87;transform:translateY(-0.5px)}
+        button:active{transform:translateY(0)}
+        input:focus,select:focus{border-color:${C.cyan}!important;box-shadow:0 0 0 3px ${C.cyan}22}
+        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(0.85)}}
+        @keyframes scan{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+      `}</style>
+
+      {/* TOP NAV */}
+      <nav style={{background:C.bg,borderBottom:`1px solid ${C.border}`,padding:"0 20px",display:"flex",alignItems:"center",height:52,position:"sticky",top:0,zIndex:100,boxShadow:C.shadow,gap:0,overflowX:"auto"}}>
+        {/* Logo */}
+        <div style={{display:"flex",alignItems:"center",gap:10,marginRight:24,flexShrink:0}}>
+          <div style={{width:30,height:30,borderRadius:8,background:`linear-gradient(135deg,${C.amber},${C.orange})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,boxShadow:"0 2px 6px rgba(180,83,9,0.3)"}}>◈</div>
+          <div>
+            <div style={{fontWeight:900,fontSize:14,color:C.text,letterSpacing:"-0.02em",lineHeight:1}}>NexusBot</div>
+            <div style={{fontSize:9,color:C.muted,letterSpacing:"0.04em"}}>v5 · AUTO TRADER</div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 13px",height:"100%",display:"flex",alignItems:"center",cursor:"pointer",color:tab===t.id?tabColor(t.id):C.muted,fontSize:11,fontWeight:tab===t.id?700:500,background:"none",border:"none",borderBottom:tab===t.id?`2px solid ${tabColor(t.id)}`:"2px solid transparent",fontFamily:MONO,transition:"all 0.12s",whiteSpace:"nowrap"}}>
+            {t.label}
+          </button>
+        ))}
+
+        {/* Status badges */}
+        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8,flexShrink:0,paddingLeft:16}}>
+          {liveCount>0&&(
+            <span style={{...bgs(C.green),gap:5}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:C.green,display:"inline-block",animation:"pulse 1.5s ease-in-out infinite"}}/>
+              {liveCount} Live
+            </span>
+          )}
+          {pendingAlerts>0&&<span style={bgs(C.orange)}>🔔 {pendingAlerts}</span>}
+          <span style={bgs(apiKeys.live?C.red:C.cyan)}>{apiKeys.live?"⚡ Live":"◎ Paper"}</span>
+        </div>
+      </nav>
+
+      {/* PRICE TICKER BAR */}
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,height:32,display:"flex",alignItems:"center",padding:"0 20px",gap:28,overflowX:"auto",flexShrink:0}}>
+        {CRYPTO_SYMS.map(sym=>{
+          const p=prices[sym],chg=p?.change24h,dir=priceDir[sym];
+          return(
+            <span key={sym} style={{whiteSpace:"nowrap",display:"flex",gap:7,alignItems:"center",fontSize:11,cursor:"pointer"}} onClick={()=>setTab("chart")}>
+              <span style={{fontWeight:700,color:C.text}}>{short(sym)}</span>
+              <span style={{color:dir==="up"?C.green:dir==="down"?C.red:C.text,transition:"color 0.35s",fontWeight:600,fontVariantNumeric:"tabular-nums"}}>
+                {p?.price?fmtUSD(p.price):"…"}
+              </span>
+              {chg!=null&&(
+                <span style={{...bgs(chg>=0?C.green:C.red,chg>=0?C.greenBg:C.redBg),fontSize:9,padding:"1px 5px"}}>
+                  {fmtPct(chg)}
+                </span>
+              )}
+              {dir&&<span style={{color:dir==="up"?C.green:C.red,fontSize:11,fontWeight:700}}>{dir==="up"?"▲":"▼"}</span>}
+            </span>
+          );
+        })}
+        <span style={{marginLeft:"auto",color:C.muted,fontSize:10,whiteSpace:"nowrap",flexShrink:0}}>
+          Click any ticker to open chart
+        </span>
+      </div>
+
+      {/* MAIN CONTENT */}
+      <main style={{overflowY:"auto",minHeight:"calc(100vh - 84px)",background:C.surface2}}>
+        {tab==="dashboard"&&<Dashboard portfolio={portfolio} prices={prices} trades={trades} bots={bots} priceDir={priceDir}/>}
+        {tab==="bots"&&<BotManager bots={bots} onAdd={addBot} onToggle={toggleBot} onRemove={removeBot} onUpdateRisk={updateRisk} prices={prices} trades={trades}/>}
+        {tab==="chart"&&<ChartView prices={prices} allCandles={candles}/>}
+        {tab==="livecharts"&&<LiveCharts prices={prices}/>}
+        {tab==="phase1"&&<Phase1Suite/>}
+        {tab==="backtest"&&<Backtest/>}
+        {tab==="ai"&&<AISignals prices={prices} candles={candles} onExecute={executeAISignal}/>}
+        {tab==="analytics"&&<Analytics trades={trades} bots={bots} portfolio={portfolio}/>}
+        {tab==="alerts"&&<Alerts prices={prices} alerts={alerts} setAlerts={setAlerts} alertLog={alertLog}/>}
+        {tab==="news"&&<NewsSentiment/>}
+        {tab==="builder"&&<StrategyBuilder onDeployCustomBot={deployCustomBot}/>}
+        {tab==="trades"&&<TradeHistory trades={trades}/>}
+        {tab==="settings"&&<Settings apiKeys={apiKeys} setApiKeys={setApiKeys} setPortfolio={setPortfolio}/>}
+      </main>
     </div>
   );
 }
