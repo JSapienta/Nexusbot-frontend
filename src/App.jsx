@@ -967,7 +967,7 @@ function AISignals({prices,candles,onExecute}){
     const c=raw.map(d=>d.close),r=calcRSI(c),bb=calcBB(c),{line:ml,signal:sl}=calcMACD(c),n=c.length-1,price=prices[sym]?.price||c[n];
     const last20=raw.slice(-20).map(d=>({o:d.open.toFixed(2),h:d.high.toFixed(2),l:d.low.toFixed(2),c:d.close.toFixed(2)}));
     const prompt=`You are a professional crypto trading analyst. Analyze ${sym} on ${interval} timeframe.\nCurrent price: $${price}\nLast 20 candles OHLC: ${JSON.stringify(last20)}\nRSI(14): ${r[n]?.toFixed(2)}, MACD Line: ${ml[n]?.toFixed(6)}, BB Upper: $${bb[n]?.upper?.toFixed(2)}, Lower: $${bb[n]?.lower?.toFixed(2)}, EMA9: $${calcEMA(c,9)[n]?.toFixed(2)}, EMA21: $${calcEMA(c,21)[n]?.toFixed(2)}\nRespond ONLY in this exact JSON, no other text:\n{"signal":"BUY","confidence":7,"analysis":"2-sentence analysis.","entry":${price.toFixed(2)},"target":0,"stopLoss":0}`;
-    try{const res=await fetch(`${BACKEND_URL}/api/ai-signal`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt})});const data=await res.json();const text=data.content?.[0]?.text||"";const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());const entry={...parsed,sym,interval,timestamp:Date.now(),price};setSigs(p=>[entry,...p.slice(0,9)]);if(auto&&parsed.signal!=="HOLD")onExecute(sym,parsed.signal,price,amt);}
+    try{const res=await fetch(`${BACKEND_URL}/api/ai-signal`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt})});const data=await res.json();if(data.error)throw new Error(data.error);const text=data.content?.[0]?.text||"";if(!text)throw new Error("Empty AI response — add ANTHROPIC_API_KEY to Railway Variables");const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());const text=data.content?.[0]?.text||"";const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());const entry={...parsed,sym,interval,timestamp:Date.now(),price};setSigs(p=>[entry,...p.slice(0,9)]);if(auto&&parsed.signal!=="HOLD")onExecute(sym,parsed.signal,price,amt);}
     catch(e){setSigs(p=>[{signal:"ERROR",confidence:0,analysis:`Failed: ${e.message}`,sym,interval,timestamp:Date.now(),price},...p.slice(0,9)]);}
     setLoad(false);};
   const sc=s=>s==="BUY"?C.green:s==="SELL"?C.red:s==="HOLD"?C.cyan:C.muted;
@@ -1433,6 +1433,31 @@ export default function TradingBot(){
         setPrices(p=>({...p,[sym]:{price:last.close,change24h:(last.close-first.close)/first.close*100}}));
       });
     });
+  },[]);
+
+  /* Price polling — refreshes every 15s as reliable fallback for WebSocket */
+  useEffect(()=>{
+    const poll=async()=>{
+      try{
+        const r=await fetch(`${BACKEND_URL}/api/prices`);
+        const d=await r.json();
+        if(!d||d.error)return;
+        Object.entries(d).forEach(([sym,info])=>{
+          if(!info?.price)return;
+          const prev=prevPriceRef.current[sym];
+          const dir=prev?info.price>prev?"up":info.price<prev?"down":null:null;
+          prevPriceRef.current[sym]=info.price;
+          setPrices(p=>({...p,[sym]:info}));
+          if(dir){
+            setPriceDir(p=>({...p,[sym]:dir}));
+            setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);
+          }
+        });
+      }catch{}
+    };
+    poll();
+    const id=setInterval(poll,15000);
+    return()=>clearInterval(id);
   },[]);
 
   /* WebSocket: live prices + price direction flash + alert checking */
