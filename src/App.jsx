@@ -1854,10 +1854,16 @@ export default function TradingBot(){
           const dir=prev?info.price>prev?"up":info.price<prev?"down":null:null;
           prevPriceRef.current[sym]=info.price;
           setPrices(p=>({...p,[sym]:info}));
-          if(dir){
-            setPriceDir(p=>({...p,[sym]:dir}));
-            setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);
-          }
+          if(dir){setPriceDir(p=>({...p,[sym]:dir}));setTimeout(()=>setPriceDir(p=>({...p,[sym]:null})),700);}
+          /* Check price alerts on every poll tick */
+          alertsRef.current.filter(a=>a.active&&!a.triggered&&a.symbol===sym).forEach(a=>{
+            if((a.dir==="above"&&info.price>=a.price)||(a.dir==="below"&&info.price<=a.price)){
+              setAlerts(p=>p.map(x=>x.id===a.id?{...x,triggered:true,triggeredAt:Date.now(),triggeredPrice:info.price}:x));
+              setAlertLog(p=>[{...a,triggeredAt:Date.now(),triggeredPrice:info.price},...p.slice(0,99)]);
+              if(typeof Notification!=="undefined"&&Notification.permission==="granted")
+                try{new Notification(`NEXUSBOT: ${sym} Alert 🔔`,{body:`Price ${a.dir==="above"?"crossed above":"dropped below"} $${a.price}. Now: $${info.price.toFixed(4)}`});}catch{}
+            }
+          });
         });
       }catch{}
     };
